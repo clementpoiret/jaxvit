@@ -1,0 +1,15 @@
+[tool.poetry]
+name = "jaxvit"
+version = "0.1.0"
+description = ""
+authors = ["Clément POIRET <poiret.clement@outlook.fr>"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+jax = "^0.4.14"
+flax = "^0.7.2"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
