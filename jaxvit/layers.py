@@ -281,6 +281,8 @@ class Attention(nn.Module):
         """
         B, N, C = x.shape
 
+        rng1, rng2 = jax.random.split(rng, 2)
+
         # JAX code:
         qkv = self.qkv(x)
         qkv = jnp.reshape(qkv, [B, N, 3, self.num_heads, self.head_dim])
@@ -294,12 +296,12 @@ class Attention(nn.Module):
             q = q * self.scale
             attn = q @ jnp.transpose(k, [0, 1, 3, 2])
             attn = nn.activation.softmax(attn, axis=-1)
-            attn = self.attn_drop(attn)
+            attn = self.attn_drop(attn, deterministic=deterministic, rng=rng1)
             x = attn @ v
 
         x = jnp.transpose(x, [0, 2, 3, 1])
         x = jnp.reshape(x, [B, N, C])
         x = self.proj(x)
-        x = self.proj_drop(x)
+        x = self.proj_drop(x, deterministic=deterministic, rng=rng2)
 
         return x
