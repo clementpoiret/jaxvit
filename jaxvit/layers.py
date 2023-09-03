@@ -1,8 +1,8 @@
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
-import flax.linen as nn
 from jax import lax
 
 KeyArray = Union[jax.Array, jax.random.KeyArray]
@@ -55,7 +55,7 @@ class PatchDropout(nn.Module):
             inputs: the inputs that should be randomly dropped out.
             deterministic: if `True`, disables dropout.
             rng: an optional PRNGKey used as the random key, if not specified, one
-            will be generated using ``make_rng`` with the ``rng_collection`` name.
+                will be generated using ``make_rng`` with the ``rng_collection`` name.
 
         Returns:
             The inputs with dropout applied.
@@ -99,3 +99,100 @@ class PatchDropout(nn.Module):
             return kept_tokens, keep_indices
 
         return kept_tokens
+
+
+class PatchEmbed(nn.Module):
+    """ 2D Image to Patch Embedding
+    """
+    img_size: int = 224
+    patch_size: int = 16
+    in_chans: int = 3
+    embed_dim: int = 768
+    norm_layer: Optional[Callable] = None
+    flatten: bool = True
+    bias: bool = True
+    dynamic_img_pad: bool = False
+
+    def setup(self):
+        self.patch_size = (self.patch_size, self.patch_size)
+        self.grid_size = tuple(
+            [s // p for s, p in zip(self.img_size, self.patch_size)])
+        self.num_patches = self.grid_size[0] * self.grid_size[1]
+
+        self.proj = nn.Conv(features=self.embed_dim,
+                            kernel_size=self.patch_size,
+                            strides=self.patch_size,
+                            padding="VALID",
+                            use_bias=self.bias,
+                            name="patch_embed")
+        self.norm = self.norm_layer(
+            self.embed_dim) if self.norm_layer else Identity()
+
+    def __call__(self, x):
+        B, H, W, C = x.shape
+        x = self.proj(x)  # B Ph Pw C
+        if self.flatten:
+            x = jnp.reshape(x, [B, -1, C])  # BLC
+
+        x = self.norm(x)
+
+        return x
+
+
+def drop_path(x,
+              drop_prob: float = 0.,
+              deterministic: Optional[bool] = False,
+              scale_by_keep: bool = True,
+              rng: Optional[KeyArray] = None):
+    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks).
+    """
+    if drop_prob == 0. or deterministic:
+        return x
+
+    keep_prob = 1 - drop_prob
+
+    random_tensor = jax.random.bernoulli(rng, p=keep_prob, shape=x.shape)
+    if keep_prob > 0.0 and scale_by_keep:
+        random_tensor = random_tensor / keep_prob
+
+    return x * random_tensor
+
+
+class DropPath(nn.Module):
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+    """
+
+    drop_prob: float = 0.
+    deterministic: Optional[bool] = False
+    scale_by_keep: bool = True
+    rng_collection: str = "dropout"
+
+    @nn.compact
+    def __call__(self,
+                 inputs,
+                 deterministic: Optional[bool] = None,
+                 rng: Optional[KeyArray] = None):
+        """Applies dropout on patch tokens.
+
+        Args:
+            inputs: the inputs that should be randomly dropped out.
+            deterministic: if `True`, disables dropout.
+            rng: an optional PRNGKey used as the random key, if not specified, one
+                will be generated using ``make_rng`` with the ``rng_collection`` name.
+
+        Returns:
+            The inputs with dropout applied.
+        """
+        assert 0 <= self.drop_prob < 1.0
+
+        if rng is None:
+            rng = self.make_rng(self.rng_collection)
+
+        deterministic = nn.merge_param("deterministic", self.deterministic,
+                                       deterministic)
+
+        if self.drop_prob == 0.0 or self.deterministic:
+            return inputs
+
+        return drop_path(inputs, self.drop_prob, self.deterministic,
+                         self.scale_by_keep, rng)
