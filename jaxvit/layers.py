@@ -3,7 +3,6 @@ from typing import Callable, Optional, Union
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
-from jax import lax
 
 KeyArray = Union[jax.Array, jax.random.KeyArray]
 
@@ -160,6 +159,12 @@ def drop_path(x,
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+
+    Attributes:
+        drop_prob: the dropout probability (_not_ the keep rate!)
+        deterministic: if `True`, disables dropout
+        scale_by_keep: if `True`, scales the output by the keep rate
+        rng_collection: the rng collection name to use when requesting an rng key.
     """
 
     drop_prob: float = 0.
@@ -196,3 +201,105 @@ class DropPath(nn.Module):
 
         return drop_path(inputs, self.drop_prob, self.deterministic,
                          self.scale_by_keep, rng)
+
+
+class LayerScale(nn.Module):
+    """Layer scale for feed forward and attention layers.
+
+    Attributes:
+        dim: the dimension of the input
+        init_values: the initial value of the scaling factor
+    """
+    dim: int
+    init_values: float = 1e-5
+
+    @nn.compact
+    def __call__(self, x):
+        """Applies the layer scale.
+
+        Args:
+            x: the input tensor
+
+        Returns:
+            The scaled tensor
+        """
+        gamma = self.param("gamma", lambda k, s: jnp.ones(s) * self.init_values,
+                           (self.dim,))
+        return x * gamma
+
+
+class Attention(nn.Module):
+    """Multi-head self-attention with relative positional encoding.
+
+    Attributes:
+        dim: the dimension of the input
+        num_heads: the number of attention heads
+        qkv_bias: if `True`, add a learnable bias to q, k, v
+        qk_norm: if `True`, normalize the query and key
+        attn_drop: the dropout rate for attention weights
+        proj_drop: the dropout rate for the outputs
+        norm_layer: the normalization layer to apply to the output
+    """
+    dim: int
+    fused_attn: bool = False
+    num_heads: int = 8
+    qkv_bias: bool = False
+    qk_norm: bool = False
+    attn_drop: float = 0.
+    proj_drop: float = 0.
+    norm_layer: Optional[Callable] = nn.LayerNorm
+
+    def setup(self):
+        assert dim % num_heads == 0, "dimension must be divisible by number of heads"
+        self.head_dim = self.dim // self.num_heads
+        self.scale = self.head_dim**-0.5
+        # self.fused_attn = use_fused_attn()
+
+        self.qkv = nn.Dense(features=3 * self.dim,
+                            use_bias=self.qkv_bias,
+                            name="qkv")
+        self.q_norm = self.norm_layer(self.dim) if self.qk_norm else Identity()
+        self.k_norm = self.norm_layer(self.dim) if self.qk_norm else Identity()
+        self.attn_drop = nn.Dropout(rate=self.attn_drop)
+        self.proj = nn.Dense(features=self.dim, name="proj")
+        self.proj_drop = nn.Dropout(rate=self.proj_drop)
+
+    def __call__(self,
+                 x,
+                 deterministic: Optional[bool] = None,
+                 rng: Optional[KeyArray] = None):
+        """ Applies multi-head self-attention.
+
+        Args:
+            x: the input tensor
+            deterministic: if `True`, disables dropout
+            rng: an optional PRNGKey used as the random key, if not specified, one
+                will be generated using ``make_rng`` with the ``rng_collection`` name.
+
+        Returns:
+            The output of the self-attention layer.
+        """
+        B, N, C = x.shape
+
+        # JAX code:
+        qkv = self.qkv(x)
+        qkv = jnp.reshape(qkv, [B, N, 3, self.num_heads, self.head_dim])
+        qkv = jnp.transpose(qkv, [2, 0, 3, 1, 4])
+        q, k, v = qkv[0], qkv[1], qkv[2]
+        q, k = self.q_norm(q), self.k_norm(k)
+
+        if self.fused_attn:
+            raise NotImplementedError("Fused attention not implemented yet.")
+        else:
+            q = q * self.scale
+            attn = q @ jnp.transpose(k, [0, 1, 3, 2])
+            attn = nn.activation.softmax(attn, axis=-1)
+            attn = self.attn_drop(attn)
+            x = attn @ v
+
+        x = jnp.transpose(x, [0, 2, 3, 1])
+        x = jnp.reshape(x, [B, N, C])
+        x = self.proj(x)
+        x = self.proj_drop(x)
+
+        return x
