@@ -245,12 +245,12 @@ class Attention(nn.Module):
     num_heads: int = 8
     qkv_bias: bool = False
     qk_norm: bool = False
-    attn_drop: float = 0.
-    proj_drop: float = 0.
+    attn_drop_rate: float = 0.
+    proj_drop_rate: float = 0.
     norm_layer: Optional[Callable] = nn.LayerNorm
 
     def setup(self):
-        assert dim % num_heads == 0, "dimension must be divisible by number of heads"
+        assert self.dim % self.num_heads == 0, "dimension must be divisible by number of heads"
         self.head_dim = self.dim // self.num_heads
         self.scale = self.head_dim**-0.5
         # self.fused_attn = use_fused_attn()
@@ -260,9 +260,9 @@ class Attention(nn.Module):
                             name="qkv")
         self.q_norm = self.norm_layer(self.dim) if self.qk_norm else Identity()
         self.k_norm = self.norm_layer(self.dim) if self.qk_norm else Identity()
-        self.attn_drop = nn.Dropout(rate=self.attn_drop)
+        self.attn_drop = nn.Dropout(rate=self.attn_drop_rate)
         self.proj = nn.Dense(features=self.dim, name="proj")
-        self.proj_drop = nn.Dropout(rate=self.proj_drop)
+        self.proj_drop = nn.Dropout(rate=self.proj_drop_rate)
 
     def __call__(self,
                  x,
@@ -284,22 +284,23 @@ class Attention(nn.Module):
         rng1, rng2 = jax.random.split(rng, 2)
 
         # JAX code:
-        qkv = self.qkv(x)
-        qkv = jnp.reshape(qkv, [B, N, 3, self.num_heads, self.head_dim])
-        qkv = jnp.transpose(qkv, [2, 0, 3, 1, 4])
+        qkv = self.qkv(x)  # B N 3C
+        qkv = jnp.reshape(qkv,
+                          [B, N, 3, self.num_heads, self.head_dim])  # B N 3 H C
+        qkv = jnp.transpose(qkv, [2, 0, 3, 1, 4])  # 3 B H N C
         q, k, v = qkv[0], qkv[1], qkv[2]
         q, k = self.q_norm(q), self.k_norm(k)
 
         if self.fused_attn:
             raise NotImplementedError("Fused attention not implemented yet.")
         else:
-            q = q * self.scale
-            attn = q @ jnp.transpose(k, [0, 1, 3, 2])
+            q = q * self.scale  # B H N C
+            attn = q @ jnp.transpose(k, [0, 1, 3, 2])  # B H N N
             attn = nn.activation.softmax(attn, axis=-1)
             attn = self.attn_drop(attn, deterministic=deterministic, rng=rng1)
-            x = attn @ v
+            x = attn @ v  # B H N C
 
-        x = jnp.transpose(x, [0, 2, 3, 1])
+        x = jnp.transpose(x, [0, 2, 3, 1])  # B N C H
         x = jnp.reshape(x, [B, N, C])
         x = self.proj(x)
         x = self.proj_drop(x, deterministic=deterministic, rng=rng2)
